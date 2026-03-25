@@ -2,17 +2,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::es::EsClient;
+use crate::interceptor::{self, Interceptor, InterceptorArgs};
 use crate::logging::AccessLogger;
 use crate::policy::engine::PolicyEngine;
 use crate::prompt::PromptDispatcher;
+use crate::store;
 
-/// Main daemon that orchestrates all components.
 pub struct Daemon {
     config: Config,
     policy: Arc<PolicyEngine>,
     logger: Arc<AccessLogger>,
-    es_client: Option<EsClient>,
+    store: Arc<dyn store::BackingStore>,
+    interceptor: Option<Box<dyn Interceptor>>,
     rt_handle: tokio::runtime::Handle,
 }
 
@@ -26,41 +27,46 @@ impl Daemon {
         ));
 
         let policy = Arc::new(PolicyEngine::new(&config, prompter));
+        let store: Arc<dyn store::BackingStore> = Arc::from(store::create_store()?);
         let rt_handle = tokio::runtime::Handle::current();
 
-        Ok(Self {
+        return Ok(Self {
             config,
             policy,
             logger,
-            es_client: None,
+            store,
+            interceptor: None,
             rt_handle,
-        })
+        });
     }
 
-    /// Start: create ES client, subscribe to AUTH_OPEN on watched paths.
     pub async fn start(&mut self) -> anyhow::Result<()> {
         let watched = self.config.watched_paths();
 
-        let es = EsClient::new(
-            watched.clone(),
-            Arc::clone(&self.policy),
-            Arc::clone(&self.logger),
-            self.rt_handle.clone(),
-        )?;
+        let args = InterceptorArgs {
+            watched_paths: watched.clone(),
+            policy: Arc::clone(&self.policy),
+            logger: Arc::clone(&self.logger),
+            store: Arc::clone(&self.store),
+            rt_handle: self.rt_handle.clone(),
+            restore_on_stop: self.config.settings.restore_on_stop,
+        };
 
-        self.es_client = Some(es);
+        let mut interceptor = interceptor::create_interceptor(args)?;
+        interceptor.start()?;
+        self.interceptor = Some(interceptor);
 
-        tracing::info!(
-            "cred-guard started, watching {} files",
-            watched.len()
-        );
-        Ok(())
+        tracing::info!("cred-guard started, watching {} files", watched.len());
+
+        return Ok(());
     }
 
-    /// Stop: drop the ES client (unsubscribes automatically).
     pub async fn stop(&mut self) -> anyhow::Result<()> {
-        self.es_client.take(); // Drop triggers cleanup
+        if let Some(mut interceptor) = self.interceptor.take() {
+            interceptor.stop()?;
+        }
         tracing::info!("cred-guard stopped");
-        Ok(())
+
+        return Ok(());
     }
 }

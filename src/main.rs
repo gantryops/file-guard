@@ -1,12 +1,18 @@
 mod cli;
 mod config;
 mod daemon;
-mod es;
+mod interceptor;
 mod logging;
 mod policy;
 mod process;
 mod prompt;
 mod store;
+
+#[cfg(target_os = "macos")]
+mod es;
+
+#[cfg(target_os = "linux")]
+mod fuse_fs;
 
 use clap::Parser;
 use cli::{Cli, Command, RulesAction};

@@ -5,8 +5,8 @@ use crate::config::{Config, RuleAction};
 use crate::policy::rule::{Action, Decision, Rule};
 use crate::policy::session::SessionState;
 use crate::process::identify::ProcessInfo;
-use crate::prompt::types::{PromptRequest, UserChoice};
 use crate::prompt::PromptDispatcher;
+use crate::prompt::types::{PromptRequest, UserChoice};
 
 pub struct PolicyEngine {
     rules: RwLock<Vec<Rule>>,

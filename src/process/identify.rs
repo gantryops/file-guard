@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 
-/// Complete information about a process requesting file access.
+#[cfg(target_os = "macos")]
+use super::macos as platform;
+
+#[cfg(target_os = "linux")]
+use super::linux as platform;
+
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: u32,
@@ -11,7 +16,6 @@ pub struct ProcessInfo {
     pub code_signature: Option<String>,
 }
 
-/// A process in the parent chain.
 #[derive(Debug, Clone)]
 pub struct ParentProcess {
     pub pid: u32,
@@ -19,25 +23,24 @@ pub struct ParentProcess {
     pub binary_path: Option<PathBuf>,
 }
 
-/// Resolve a PID into full ProcessInfo.
 pub fn identify(pid: u32) -> anyhow::Result<ProcessInfo> {
-    let binary_path = super::macos::binary_path(pid)?;
+    let binary_path = platform::binary_path(pid)?;
     let binary_name = binary_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("pid:{pid}"));
-    let start_time = super::macos::start_time(pid)?;
+    let start_time = platform::start_time(pid)?;
     let parent_chain = parent_chain(pid);
-    let code_signature = super::macos::code_signature(pid);
+    let code_signature = platform::code_signature(pid);
 
-    Ok(ProcessInfo {
+    return Ok(ProcessInfo {
         pid,
         start_time,
         binary_path,
         binary_name,
         parent_chain,
         code_signature,
-    })
+    });
 }
 
 /// Walk the parent PID chain up to launchd.

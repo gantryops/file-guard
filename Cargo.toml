@@ -2,7 +2,7 @@
 name = "cred-guard"
 version = "0.1.0"
 edition = "2024"
-description = "Endpoint Security credential access control daemon for macOS"
+description = "Credential access control daemon (macOS Endpoint Security / Linux FUSE)"
 license = "MIT"
 
 [dependencies]
@@ -43,5 +43,8 @@ serde_json = "1.0"
 # File locking for config append
 fs2 = "0.4"
 
-# macOS Endpoint Security FFI
+# Platform FFI
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.15"

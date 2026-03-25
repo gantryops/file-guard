@@ -140,10 +140,7 @@ pub enum es_new_client_result_t {
 type EsHandler = unsafe extern "C" fn(client: *mut es_client_t, message: *const es_message_t);
 
 unsafe extern "C" {
-    fn es_new_client(
-        client: *mut *mut es_client_t,
-        handler: EsHandler,
-    ) -> es_new_client_result_t;
+    fn es_new_client(client: *mut *mut es_client_t, handler: EsHandler) -> es_new_client_result_t;
 
     fn es_delete_client(client: *mut es_client_t) -> es_return_t;
 
@@ -283,7 +280,10 @@ impl EsClient {
 
         let rc = unsafe { es_new_client(&mut client, handle_event) };
         if rc as i32 != es_new_client_result_t::ES_NEW_CLIENT_RESULT_SUCCESS as i32 {
-            anyhow::bail!("es_new_client failed (rc={:?}). Run as root with ES entitlement.", rc as i32);
+            anyhow::bail!(
+                "es_new_client failed (rc={:?}). Run as root with ES entitlement.",
+                rc as i32
+            );
         }
 
         // Mute all paths, then invert → only unmuted (watched) paths deliver events.
@@ -342,5 +342,43 @@ impl Drop for EsClient {
             }
             tracing::info!("Endpoint Security client stopped");
         }
+    }
+}
+
+// ── Interceptor adapter ──────────────────────────────────────────
+
+use crate::interceptor::{Interceptor, InterceptorArgs};
+
+pub struct EsInterceptor {
+    args: Option<InterceptorArgs>,
+    client: Option<EsClient>,
+}
+
+impl EsInterceptor {
+    pub fn new(args: InterceptorArgs) -> Self {
+        return Self {
+            args: Some(args),
+            client: None,
+        };
+    }
+}
+
+impl Interceptor for EsInterceptor {
+    fn start(&mut self) -> anyhow::Result<()> {
+        let args = self
+            .args
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("EsInterceptor already started"))?;
+
+        let es = EsClient::new(args.watched_paths, args.policy, args.logger, args.rt_handle)?;
+        self.client = Some(es);
+
+        return Ok(());
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        self.client.take();
+
+        return Ok(());
     }
 }

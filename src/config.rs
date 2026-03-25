@@ -85,9 +85,7 @@ impl Config {
         use std::io::Write;
 
         let path = config_path();
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)?;
+        let file = std::fs::OpenOptions::new().append(true).open(&path)?;
         file.lock_exclusive()?;
 
         let rule_toml = toml::to_string(entry)?;
@@ -127,10 +125,7 @@ fn config_path() -> PathBuf {
     // real user's config rather than root's.
     if let Ok(sudo_user) = std::env::var("SUDO_USER") {
         if let Some(home) = home_for_user(&sudo_user) {
-            return home
-                .join(".config")
-                .join("cred-guard")
-                .join("config.toml");
+            return home.join(".config").join("cred-guard").join("config.toml");
         }
     }
     dirs::config_dir()

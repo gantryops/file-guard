@@ -5,8 +5,7 @@ pub fn binary_path(pid: u32) -> anyhow::Result<PathBuf> {
     use std::ffi::CStr;
 
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let ret =
-        unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let ret = unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr().cast(), buf.len() as u32) };
 
     if ret <= 0 {
         anyhow::bail!("proc_pidpath failed for pid {pid}");

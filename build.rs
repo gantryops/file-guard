@@ -1,11 +1,24 @@
 fn main() {
-    let sdk = std::process::Command::new("xcrun")
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    match target_os.as_str() {
+        "macos" => {
+            return link_macos_endpoint_security();
+        }
+        _ => {
+            return;
+        }
+    }
+}
+
+fn link_macos_endpoint_security() {
+    let output = std::process::Command::new("xcrun")
         .args(["--show-sdk-path"])
         .output()
         .expect("xcrun failed")
         .stdout;
-    let sdk = String::from_utf8(sdk).unwrap();
-    let sdk = sdk.trim();
+    let sdk_raw = String::from_utf8(output).unwrap();
+    let sdk = sdk_raw.trim();
 
     println!("cargo:rustc-link-search=native={sdk}/usr/lib");
     println!("cargo:rustc-link-lib=dylib=EndpointSecurity");

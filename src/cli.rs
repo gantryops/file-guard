@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "cred-guard", about = "FUSE-based credential access control daemon")]
+#[command(
+    name = "cred-guard",
+    about = "FUSE-based credential access control daemon"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
