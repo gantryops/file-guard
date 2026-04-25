@@ -93,7 +93,6 @@ impl Interceptor for FuseInterceptor {
             let mount_options = [
                 MountOption::RO,
                 MountOption::FSName("cred-guard".to_string()),
-                MountOption::AllowRoot,
             ];
 
             let session = fuser::spawn_mount2(credential_fs, watched_path, &mount_options)
