@@ -32,6 +32,7 @@ impl PolicyEngine {
                 sha256: r.sha256.clone(),
                 signature: r.signature.clone(),
                 script: r.script.clone(),
+                script_sha256: r.script_sha256.clone(),
             })
             .collect();
 
@@ -156,6 +157,31 @@ impl PolicyEngine {
             }
         }
 
+        // ...and the script's contents, so an in-place edit at the same path
+        // re-prompts (path-pinning alone misses this on mutable-path distros).
+        if let Some(expected) = &rule.script_sha256 {
+            let Some(script) = &process.script else {
+                return false;
+            };
+            match crate::process::integrity::hash_file(script) {
+                Ok(actual) if &actual == expected => {}
+                Ok(_) => {
+                    tracing::info!(
+                        "script {} changed since its rule was pinned — re-prompting",
+                        script.display()
+                    );
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "cannot hash script {} to verify its rule ({e}) — re-prompting",
+                        script.display()
+                    );
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
@@ -173,6 +199,20 @@ impl PolicyEngine {
             }
         };
 
+        // Some only for interpreters — pins the program, not just the runtime,
+        // by both path and content hash.
+        let script_sha256 =
+            process
+                .script
+                .as_ref()
+                .and_then(|s| match crate::process::integrity::hash_file(s) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        tracing::warn!("cannot hash script {} to pin its rule ({e})", s.display());
+                        None
+                    }
+                });
+
         let rule = Rule {
             file: file.to_path_buf(),
             binary: process.binary_path.clone(),
@@ -181,11 +221,11 @@ impl PolicyEngine {
             sha256,
             // None on Linux (code_signature is always None there).
             signature: process.code_signature.clone(),
-            // Some only for interpreters — pins the program, not just the runtime.
             script: process
                 .script
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            script_sha256,
         };
 
         // Best-effort persist; don't fail the access if the config write fails.
@@ -207,6 +247,7 @@ impl PolicyEngine {
             sha256: rule.sha256.clone(),
             signature: rule.signature.clone(),
             script: rule.script.clone(),
+            script_sha256: rule.script_sha256.clone(),
         };
         Config::append_rule(&entry)?;
         self.rules.write().unwrap().push(rule);
@@ -271,6 +312,7 @@ mod tests {
             sha256,
             signature: None,
             script: None,
+            script_sha256: None,
         }
     }
 
@@ -303,5 +345,45 @@ mod tests {
         assert!(eng.identity_matches(&rule_for(&bin, None), &info_for(&bin)));
 
         std::fs::remove_file(&bin).ok();
+    }
+
+    #[test]
+    fn script_content_change_is_a_nonmatch() {
+        let dir = std::env::temp_dir();
+        let bin = dir.join(format!("fg-interp-{}", std::process::id()));
+        let script = dir.join(format!("fg-prog-{}.py", std::process::id()));
+        std::fs::write(&bin, b"interp").unwrap();
+        std::fs::write(&script, b"print('v1')").unwrap();
+
+        let eng = engine();
+        let bin_hash = crate::process::integrity::hash_file(&bin).unwrap();
+        let script_hash = crate::process::integrity::hash_file(&script).unwrap();
+
+        let mut info = info_for(&bin);
+        info.script = Some(script.clone());
+
+        let rule = |script_sha256| Rule {
+            file: PathBuf::from("/f"),
+            binary: bin.clone(),
+            action: Action::Allow,
+            access: Access::Read,
+            sha256: Some(bin_hash.clone()),
+            signature: None,
+            script: Some(script.to_string_lossy().into_owned()),
+            script_sha256,
+        };
+
+        // Matching script content → matches.
+        assert!(eng.identity_matches(&rule(Some(script_hash.clone())), &info));
+
+        // Edited in place at the same path → no match (re-prompt).
+        std::fs::write(&script, b"print('v2-longer')").unwrap();
+        assert!(!eng.identity_matches(&rule(Some(script_hash)), &info));
+
+        // No script pin → content is not checked (path pin still holds).
+        assert!(eng.identity_matches(&rule(None), &info));
+
+        std::fs::remove_file(&bin).ok();
+        std::fs::remove_file(&script).ok();
     }
 }

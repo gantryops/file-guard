@@ -68,6 +68,10 @@ pub struct Rule {
     /// the same interpreter but a *different* script does not match (re-prompts),
     /// narrowing "any python" to "this program".
     pub script: Option<String>,
+    /// sha256 of the pinned script's contents. When set, a caller whose script
+    /// hashes differently does not match (re-prompts) — catches in-place edits
+    /// where the script path stays the same.
+    pub script_sha256: Option<String>,
 }
 
 /// Outcome of a policy evaluation.

@@ -80,6 +80,10 @@ pub struct RuleEntry {
     /// to a specific program).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    /// sha256 of the pinned script's contents (interpreter rules only). Catches
+    /// in-place tampering on distros where the script path is stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_sha256: Option<String>,
 }
 
 fn access_is_read(access: &Access) -> bool {
@@ -298,6 +302,7 @@ action = "allow"
             sha256: Some("deadbeef".into()),
             signature: None,
             script: None,
+            script_sha256: None,
         };
         let serialized = toml::to_string(&entry).unwrap();
         assert!(serialized.contains("access = \"write\""));
