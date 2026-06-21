@@ -1,0 +1,15 @@
+# Root-anchored prompt-agent socket. Created and held by root (PID 1) inside
+# the root-owned /run/file-guard, mode 0600 — so a same-uid attacker can neither
+# hijack the socket name nor connect to it and self-approve prompts. This is the
+# hardened topology; enable it for the guarded user, e.g.:
+#   sudo systemctl enable --now file-guard-agent@alice.socket
+[Unit]
+Description=file-guard prompt agent socket (root-anchored)
+Documentation=https://github.com/gantryops/file-guard
+
+[Socket]
+ListenStream=/run/file-guard/agent.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

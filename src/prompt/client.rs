@@ -23,7 +23,6 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct PromptClient {
     socket_path: PathBuf,
     timeout: Duration,
-    default_action: DefaultAction,
     /// uid the agent is expected to run as (the guarded user). A peer with any
     /// other uid is rejected - defense in depth on top of the root-owned socket
     /// directory.
@@ -31,34 +30,35 @@ pub struct PromptClient {
 }
 
 impl PromptClient {
-    pub fn new(
-        socket_path: PathBuf,
-        timeout: Duration,
-        default_action: DefaultAction,
-        expected_uid: u32,
-    ) -> Self {
+    pub fn new(socket_path: PathBuf, timeout: Duration, expected_uid: u32) -> Self {
         Self {
             socket_path,
             timeout,
-            default_action,
             expected_uid,
         }
     }
 
-    /// Ask the agent for a decision, falling back to `default_action`.
-    pub async fn prompt(&self, process: &ProcessInfo, file: &Path, access: Access) -> UserChoice {
+    /// Ask the agent for a decision, falling back to `default_action` (resolved
+    /// per watched file by the caller) when the agent doesn't decide.
+    pub async fn prompt(
+        &self,
+        process: &ProcessInfo,
+        file: &Path,
+        access: Access,
+        default_action: DefaultAction,
+    ) -> UserChoice {
         match self.request(process, file, access).await {
             Ok(PromptOutcome::Decided(choice)) => choice,
             Ok(PromptOutcome::NoResponse) => {
                 tracing::info!("agent returned no decision; applying default_action");
-                default_choice(self.default_action)
+                default_choice(default_action)
             }
             Err(e) => {
                 tracing::warn!(
                     "prompt agent at {} unreachable ({e}); applying default_action",
                     self.socket_path.display()
                 );
-                default_choice(self.default_action)
+                default_choice(default_action)
             }
         }
     }

@@ -27,7 +27,6 @@ impl Daemon {
         let prompter = Arc::new(PromptClient::new(
             config::agent_socket_path(),
             Duration::from_secs(config.settings.prompt_timeout),
-            config.settings.default_action,
             config::target_uid(),
         ));
 

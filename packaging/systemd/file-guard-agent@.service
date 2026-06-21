@@ -1,0 +1,23 @@
+# Prompt agent for user %i, started by socket activation (file-guard-agent@%i.socket).
+# Runs as the guarded user so GUI dialogs / notifications reach their session,
+# but receives the listening fd from the root socket unit — it never creates or
+# owns the socket itself.
+#
+# GUI prompts need the user's display. Provide it with a drop-in:
+#   sudo systemctl edit file-guard-agent@alice.service
+#   [Service]
+#   Environment=DISPLAY=:0
+#   Environment=XAUTHORITY=/home/alice/.Xauthority
+#   Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+[Unit]
+Description=file-guard prompt agent for %i
+Documentation=https://github.com/gantryops/file-guard
+Requires=file-guard-agent@%i.socket
+After=file-guard-agent@%i.socket
+
+[Service]
+Type=exec
+User=%i
+ExecStart=/usr/bin/file-guard agent --method gui
+Restart=on-failure
+RestartSec=2

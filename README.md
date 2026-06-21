@@ -79,9 +79,10 @@ Grab the `.deb` from a [release](https://github.com/gantryops/file-guard/release
 sudo apt install ./file-guard_*_amd64.deb
 ```
 
-It installs the binary, a root `file-guard.service`, and a per-user
-`file-guard-agent.service`, and pulls in `fuse3`. Nothing is enabled until you
-configure it - see [2b](#2b-privileged-daemon-the-secure-deployment) and
+It installs the binary, a root `file-guard.service`, and a socket-activated
+`file-guard-agent@.service` whose listening socket is created by root (the
+hardened topology), and pulls in `fuse3`. Nothing is enabled until you configure
+it - see [2b](#2b-privileged-daemon-the-secure-deployment) and
 [`packaging/README.md`](packaging/README.md).
 
 ### Nix
@@ -131,17 +132,17 @@ see what touches your secrets, but the backing store is readable by your own use
 Run the daemon as **root** so the backing store at `/var/lib/file-guard` is
 root-owned and unreadable by the user the malware runs as. **Both the Debian
 package and the NixOS module do this** - that root-owned store is the protection
-that matters. They differ only in how the prompt agent's socket is created (see
-[the agent-socket note](#security-model--limitations)): NixOS roots the socket by
-default; the `.deb` ships a convenient per-user socket but can be hardened the
-same way.
+that matters, and **both root-anchor the prompt agent's socket by default**
+(created by root via systemd socket activation, so a same-uid attacker can't
+hijack it; see [the agent-socket note](#security-model--limitations)).
 
-**Debian / Ubuntu.** After installing the `.deb`:
+**Debian / Ubuntu.** After installing the `.deb` (replace `alice`):
 
 ```sh
 echo 'FILE_GUARD_USER=alice' | sudo tee -a /etc/default/file-guard   # whose ~ is guarded
 sudoedit /etc/file-guard/config.toml                                 # add [[watch]] blocks
-systemctl --user enable --now file-guard-agent.service               # run as alice
+sudo systemctl enable --now file-guard-agent@alice.socket            # root-anchored socket
+sudo systemctl edit file-guard-agent@alice.service                   # add DISPLAY/XAUTHORITY/DBUS env
 sudo systemctl enable --now file-guard.service
 ```
 
@@ -242,15 +243,14 @@ Known limitations - read before relying on this:
   just reads the store directly. Both the Debian package and the NixOS module run
   the daemon as root for this reason. Running as your own user is
   development-only.
-- **The prompt agent must be root-anchored to be fully trustworthy.** If same-uid
-  malware can occupy the agent's socket, it can auto-approve its own prompts. The
-  NixOS module prevents this by having **root** create the socket (systemd socket
-  activation) in a root-owned directory. The Debian package's default per-user
-  agent socket (in `$XDG_RUNTIME_DIR`) is **not** hardened against a *targeted*
-  same-uid attacker racing that socket - it is still defense-in-depth against
-  opportunistic malware, and can be hardened to the root-anchored topology (see
-  [`packaging/README.md`](packaging/README.md)). The manual/dev path
-  (`file-guard agent` self-binding) carries the same caveat.
+- **The prompt agent must be root-anchored to be trustworthy** - and both
+  packaged deployments make it so by default. If same-uid malware could occupy
+  the agent's socket, it would auto-approve its own prompts; the NixOS module and
+  the Debian package both prevent this by having **root** create the socket
+  (systemd socket activation) at `/run/file-guard/agent.sock` in a root-owned
+  directory (mode `0600`). The only unhardened path is the dev-only
+  `file-guard agent` self-bind in `$XDG_RUNTIME_DIR`, which warns loudly and is
+  for testing, not protection.
 - **Linux only.** The macOS Endpoint Security path is not built - see
   [macOS](#macos).
 - **Identity = binary hash (+ script path & content hash for interpreters); a
@@ -275,6 +275,27 @@ Known limitations - read before relying on this:
 - **Writes are last-writer-wins.** Concurrent write handles to the same file
   don't merge; the last one to close persists its buffer. Fine for the
   single-writer credential-file case.
+
+## How it compares
+
+file-guard occupies a specific niche: **per-access consent for credential files
+that their own tools insist on reading from disk**, with the *tool left working
+unchanged*. That's different from the usual suspects:
+
+| Tool | Model | Where file-guard differs |
+|---|---|---|
+| **Landlock / AppArmor / SELinux** | static kernel MAC: a profile denies a process access up front | file-guard is *interactive consent* + per-binary **hash/script identity** that re-prompts on change; the guarded tool keeps working at its normal path instead of being statically denied. Landlock is also opt-in *by the process itself* - malware won't sandbox itself. |
+| **bubblewrap / firejail / containers** | sandbox the *untrusted* program away from secrets | great when you can enumerate and wrap untrusted things - but the tools that **need** the creds (`aws`, `gcloud`) can't be sandboxed away from them. file-guard guards the *file* regardless of who opens it. |
+| **1Password / `op run` / env injection** | inject secrets as env vars into tools that accept them | file-guard's niche is exactly the tools that **don't** - they write plaintext creds to disk and re-read them. It sits in front of any backend rather than replacing the vault. |
+| **Short-lived creds / OIDC / hardware keys** | remove the long-lived on-disk secret entirely | the right fix where the provider supports it; file-guard guards the antipattern for the many tools that still keep a long-lived secret on disk. |
+
+**What it deliberately does *not* do:** stop a compromised dependency running
+*inside* a tool you've already authorized (it gets that tool's secret), defend
+against root or a `ptrace`-capable same-uid process, or control network
+exfiltration. For those, combine it with sandboxing and short-lived credentials -
+file-guard shrinks the blast radius from *every secret on disk* to *the specific
+file the specific authorized binary is allowed to touch*, it isn't a total
+boundary.
 
 ## Development
 

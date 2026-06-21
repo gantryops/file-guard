@@ -1,10 +1,12 @@
 #!/bin/sh
 set -e
 
-# Make the freshly-installed units visible to systemd. We do NOT enable or
-# start anything: the admin must set FILE_GUARD_USER in /etc/default/file-guard
-# and add [[watch]] entries to /etc/file-guard/config.toml first.
+# Create the root-owned /run/file-guard now, and make the freshly-installed
+# units visible to systemd. We do NOT enable or start anything: the admin must
+# set FILE_GUARD_USER in /etc/default/file-guard, add [[watch]] entries to
+# /etc/file-guard/config.toml, and enable file-guard-agent@<user>.socket first.
 if [ -d /run/systemd/system ]; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/file-guard.conf || true
     systemctl daemon-reload || true
 fi
 

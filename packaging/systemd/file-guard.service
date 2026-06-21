@@ -10,6 +10,8 @@ Type=exec
 EnvironmentFile=-/etc/default/file-guard
 Environment=FILE_GUARD_CONFIG=/etc/file-guard/config.toml
 Environment=FILE_GUARD_STORE_DIR=/var/lib/file-guard/store
+# Connect to the root-anchored agent socket (file-guard-agent@<user>.socket).
+Environment=FILE_GUARD_AGENT_SOCKET=/run/file-guard/agent.sock
 ExecStart=/usr/bin/file-guard start
 Restart=on-failure
 RestartSec=2
@@ -20,8 +22,9 @@ TimeoutStopSec=15
 # the tool resist same-uid malware. Also holds the NDJSON audit log.
 StateDirectory=file-guard
 StateDirectoryMode=0700
-# /run/file-guard for the daemon PID file (used by `file-guard stop`/`status`).
-RuntimeDirectory=file-guard
+# /run/file-guard (PID file + agent socket) is created by the tmpfiles rule
+# shipped at /usr/lib/tmpfiles.d/file-guard.conf, so it exists before the
+# socket unit starts at sockets.target.
 
 [Install]
 WantedBy=multi-user.target

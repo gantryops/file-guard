@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
-use crate::config::{Config, RuleAction};
+use crate::config::{Config, DefaultAction, RuleAction};
 use crate::policy::rule::{Access, Action, Decision, Rule};
 use crate::policy::session::{ProcessId, SessionState};
 use crate::process::identify::ProcessInfo;
@@ -14,6 +14,10 @@ pub struct PolicyEngine {
     rules: RwLock<Vec<Rule>>,
     session: SessionState,
     prompter: Arc<PromptClient>,
+    /// Action applied when a prompt times out / the agent is unreachable.
+    global_default: DefaultAction,
+    /// Per-watched-file overrides of `global_default`.
+    file_defaults: HashMap<PathBuf, DefaultAction>,
 }
 
 impl PolicyEngine {
@@ -36,11 +40,27 @@ impl PolicyEngine {
             })
             .collect();
 
+        let file_defaults = config
+            .watch
+            .iter()
+            .filter_map(|w| w.default_action.map(|d| (Config::expand_path(&w.path), d)))
+            .collect();
+
         Self {
             rules: RwLock::new(rules),
             session: SessionState::new(),
             prompter,
+            global_default: config.settings.default_action,
+            file_defaults,
         }
+    }
+
+    /// The fallback action for `file`: its per-watch override, else the global.
+    fn default_for(&self, file: &Path) -> DefaultAction {
+        self.file_defaults
+            .get(file)
+            .copied()
+            .unwrap_or(self.global_default)
     }
 
     /// Evaluate policy for a process accessing a watched file in a given
@@ -68,8 +88,17 @@ impl PolicyEngine {
             return Decision::AllowSession;
         }
 
-        // 3. Unknown - prompt the user (via the session agent).
-        let choice = self.prompter.prompt(process, watched_file, access).await;
+        // 3. Unknown - prompt the user (via the session agent). On no response,
+        // the client applies this file's default action.
+        let choice = self
+            .prompter
+            .prompt(
+                process,
+                watched_file,
+                access,
+                self.default_for(watched_file),
+            )
+            .await;
 
         match choice {
             UserChoice::AllowOnce => Decision::AllowOnce,
@@ -285,7 +314,6 @@ mod tests {
         let client = Arc::new(crate::prompt::PromptClient::new(
             PathBuf::from("/nonexistent.sock"),
             Duration::from_secs(1),
-            crate::config::DefaultAction::Deny,
             0,
         ));
         PolicyEngine::new(&config, client)
@@ -385,5 +413,30 @@ mod tests {
 
         std::fs::remove_file(&bin).ok();
         std::fs::remove_file(&script).ok();
+    }
+
+    #[test]
+    fn per_file_default_action_overrides_global() {
+        // Global deny, but /a is allow-by-default. With no rule and no reachable
+        // agent, evaluate() falls back to each file's default.
+        let config: Config = toml::from_str(
+            "[settings]\ndefault_action = \"deny\"\n\
+             [[watch]]\npath = \"/a\"\ndefault_action = \"allow\"\n\
+             [[watch]]\npath = \"/b\"\n",
+        )
+        .unwrap();
+        let client = Arc::new(crate::prompt::PromptClient::new(
+            PathBuf::from("/nonexistent.sock"),
+            Duration::from_millis(50),
+            0,
+        ));
+        let eng = PolicyEngine::new(&config, client);
+        let proc = info_for(Path::new("/usr/bin/whatever"));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = rt.block_on(eng.evaluate(&proc, Path::new("/a"), Access::Read));
+        let b = rt.block_on(eng.evaluate(&proc, Path::new("/b"), Access::Read));
+        assert_eq!(a, Decision::AllowOnce);
+        assert_eq!(b, Decision::DenyOnce);
     }
 }

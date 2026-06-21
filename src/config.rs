@@ -52,11 +52,8 @@ pub enum PromptMethod {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WatchEntry {
     pub path: String,
-    // TODO: per-file default override is parsed but NOT yet honored - the
-    // policy engine only uses the global settings.default_action. Wire this
-    // through PolicyEngine::evaluate (keyed by watched file) before documenting
-    // it as functional.
-    #[allow(dead_code)]
+    /// Per-file override of `settings.default_action`, applied when a prompt
+    /// times out or the agent is unreachable for this file.
     #[serde(default)]
     pub default_action: Option<DefaultAction>,
 }
