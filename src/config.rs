@@ -1,6 +1,6 @@
 use crate::policy::rule::Access;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -190,6 +190,56 @@ impl Config {
         Ok(report)
     }
 
+    /// Reconcile the declarative seed into the daemon-managed live config:
+    /// `[settings]` and `[[watch]]` are taken from the seed (the operator's
+    /// source of truth, e.g. a Nix-store path), while learned `[[rule]]`
+    /// ("allow always") entries already in the live file are preserved. No-op
+    /// unless `FILE_GUARD_SEED_CONFIG` is set.
+    ///
+    /// This lets declarative changes apply on daemon restart without the
+    /// operator hand-deleting the live file, while never losing captured rules.
+    /// The live file is written world-readable (0644) - it holds only access
+    /// policy, no secrets - so the guarded user can run read-only `status` /
+    /// `rules` / `log` without sudo.
+    pub fn reconcile_seed() -> anyhow::Result<()> {
+        let Some(seed_path) = std::env::var_os("FILE_GUARD_SEED_CONFIG") else {
+            return Ok(());
+        };
+        let seed_path = PathBuf::from(seed_path);
+        let live_path = config_path();
+
+        let seed: Config = std::fs::read_to_string(&seed_path)
+            .map_err(|e| anyhow::anyhow!("failed to read seed config {}: {e}", seed_path.display()))
+            .and_then(|s| Ok(toml::from_str(&s)?))?;
+
+        // Preserve learned rules from the live file. If it exists but cannot be
+        // parsed, abort rather than silently dropping captured rules.
+        let rule = match std::fs::read_to_string(&live_path) {
+            Ok(contents) => {
+                toml::from_str::<Config>(&contents)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "live config {} is corrupt ({e}); refusing to overwrite it and \
+                             lose learned rules - fix or remove it manually",
+                            live_path.display()
+                        )
+                    })?
+                    .rule
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                anyhow::bail!("failed to read live config {}: {e}", live_path.display())
+            }
+        };
+
+        let merged = Config {
+            settings: seed.settings,
+            watch: seed.watch,
+            rule,
+        };
+        write_atomic(&live_path, &toml::to_string(&merged)?)
+    }
+
     /// Expand a leading `~/` to the watched user's home directory.
     ///
     /// When file-guard runs as a privileged system daemon it is *not* the
@@ -272,6 +322,28 @@ fn published_config_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Atomically write `contents` to `path` (temp file + rename) with mode 0644.
+/// The crash-safe rename means a reader never sees a half-written config.
+fn write_atomic(path: &Path, contents: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = path.with_extension("toml.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(contents.as_bytes())?;
+    file.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    }
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// The home directory of the user whose credentials are being guarded.
@@ -390,6 +462,52 @@ action = "allow"
         assert_eq!(config.settings.default_action, DefaultAction::Deny);
         assert_eq!(config.settings.prompt_timeout, 30); // serde default
         assert_eq!(config.rule[0].action, RuleAction::Allow);
+    }
+
+    #[test]
+    fn reconcile_seed_applies_seed_and_preserves_learned_rules() {
+        let dir = std::env::temp_dir().join(format!("fg-reconcile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("seed.toml");
+        let live = dir.join("live.toml");
+        std::fs::write(
+            &seed,
+            "[settings]\ndefault_action = \"deny\"\n\
+             [[watch]]\npath = \"~/.config/new/creds\"\n",
+        )
+        .unwrap();
+        // Live file has stale settings/watch plus a learned rule to preserve.
+        std::fs::write(
+            &live,
+            "[settings]\ndefault_action = \"allow\"\n\
+             [[watch]]\npath = \"~/.config/OLD/creds\"\n\
+             [[rule]]\nfile = \"~/.config/new/creds\"\n\
+             binary = \"/usr/bin/x\"\naction = \"allow\"\n",
+        )
+        .unwrap();
+
+        // SAFETY: set/remove process env around a self-contained reconcile; no
+        // other test reads these vars.
+        unsafe {
+            std::env::set_var("FILE_GUARD_SEED_CONFIG", &seed);
+            std::env::set_var("FILE_GUARD_CONFIG", &live);
+        }
+        Config::reconcile_seed().unwrap();
+        unsafe {
+            std::env::remove_var("FILE_GUARD_SEED_CONFIG");
+            std::env::remove_var("FILE_GUARD_CONFIG");
+        }
+
+        let merged: Config = toml::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+        // Seed's settings + watches win.
+        assert_eq!(merged.settings.default_action, DefaultAction::Deny);
+        assert_eq!(merged.watch.len(), 1);
+        assert_eq!(merged.watch[0].path, "~/.config/new/creds");
+        // Learned rule survives.
+        assert_eq!(merged.rule.len(), 1);
+        assert_eq!(merged.rule[0].binary, "/usr/bin/x");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

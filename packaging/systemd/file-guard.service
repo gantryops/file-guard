@@ -1,6 +1,6 @@
 [Unit]
 Description=file-guard credential access control daemon
-Documentation=https://github.com/gantryops/file-guard
+Documentation=https://github.com/gantrydev/file-guard
 After=local-fs.target
 
 [Service]
@@ -21,7 +21,7 @@ TimeoutStopSec=15
 # Root-owned 0700 store, unreadable by the guarded user - this is what makes
 # the tool resist same-uid malware. Also holds the NDJSON audit log.
 StateDirectory=file-guard
-StateDirectoryMode=0700
+StateDirectoryMode=0711
 # /run/file-guard (PID file + agent socket) is created by the tmpfiles rule
 # shipped at /usr/lib/tmpfiles.d/file-guard.conf, so it exists before the
 # socket unit starts at sockets.target.

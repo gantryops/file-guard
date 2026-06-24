@@ -38,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Start { daemon: _daemonize } => {
+            // Apply declarative seed changes (settings + watches) before load,
+            // preserving learned rules; no-op unless FILE_GUARD_SEED_CONFIG set.
+            config::Config::reconcile_seed()?;
             let config = config::Config::load()?;
             let mut d = daemon::Daemon::new(config)?;
             d.start().await?;
@@ -131,11 +134,26 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Store { file } => {
-            let store = store::create_store()?;
             let expanded = config::Config::expand_path(&file.to_string_lossy());
+
+            // A live mount means the daemon already guards this path (it
+            // captured the original itself); storing again and removing the
+            // mountpoint would fight the daemon.
+            if control::is_fuse_mount(&expanded) {
+                anyhow::bail!(
+                    "{} is already guarded by a live file-guard mount; nothing to store.",
+                    expanded.display()
+                );
+            }
+
+            // Move semantics: capture the original into the store, then remove
+            // it from disk so only the guarded view remains. `restore` is the
+            // inverse. The plaintext is safe in the store throughout.
+            let store = store::create_store()?;
             let contents = std::fs::read(&expanded)?;
             store.store(&expanded, &contents)?;
-            println!("stored {}", expanded.display());
+            std::fs::remove_file(&expanded)?;
+            println!("moved {} into the backing store", expanded.display());
         }
         Command::Restore { file } => {
             let expanded = config::Config::expand_path(&file.to_string_lossy());

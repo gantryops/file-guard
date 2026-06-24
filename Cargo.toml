@@ -1,6 +1,6 @@
 [package]
 name = "file-guard"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "Per-process credential access control daemon for Linux (FUSE)"
 license = "MIT"
@@ -12,7 +12,7 @@ publish = false
 # Build: `cargo deb` → target/debian/file-guard_<ver>_<arch>.deb
 # See packaging/README.md for the unit layout and setup steps.
 [package.metadata.deb]
-maintainer = "gantryops <dianfishekqi@gmail.com>"
+maintainer = "gantrydev <dianfishekqi@gmail.com>"
 section = "admin"
 priority = "optional"
 extended-description = """

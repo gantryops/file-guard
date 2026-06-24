@@ -2,7 +2,7 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Name: file-guard
 Maintainer: File-Guard Contributors <noreply@example.com>
 License: MIT
-Source: https://github.com/gantryops/file-guard
+Source: https://github.com/gantrydev/file-guard
 
 Files: *
 Copyright: 2026 File-Guard Contributors

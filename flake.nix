@@ -31,7 +31,7 @@
               buildInputs = [ pkgs.fuse3 ];
               meta = {
                 description = "Per-process credential file access control (FUSE)";
-                homepage = "https://github.com/gantryops/file-guard";
+                homepage = "https://github.com/gantrydev/file-guard";
                 license = lib.licenses.mit;
                 mainProgram = "file-guard";
                 platforms = lib.platforms.linux;
@@ -107,7 +107,27 @@
             configFile = mkOption {
               type = types.path;
               example = "/etc/file-guard/config.toml";
-              description = "Path to the file-guard config.toml the daemon reads.";
+              description = ''
+                Path to the live config.toml the daemon reads and owns. When
+                `seedFile` is set this is the mutable copy the daemon writes
+                (settings/watches from the seed, plus learned "allow always"
+                rules); point it at a writable location like
+                `/var/lib/file-guard/config.toml`.
+              '';
+            };
+
+            seedFile = mkOption {
+              type = types.nullOr types.path;
+              default = null;
+              example = "config.toml from pkgs.writeText";
+              description = ''
+                Optional declarative seed. When set, on every start the daemon
+                reconciles `configFile`: `[settings]` and `[[watch]]` are taken
+                from this seed, while learned `[[rule]]` entries already in
+                `configFile` are preserved. This makes declarative changes apply
+                on `nixos-rebuild` without hand-deleting the live file. Leave
+                null to manage `configFile` yourself (copy-once / by hand).
+              '';
             };
 
             promptMethod = mkOption {
@@ -215,13 +235,16 @@
                 # The daemon PID file lives in /run/file-guard (created by the
                 # tmpfiles rule above), the audit log under StateDirectory.
                 StateDirectory = "file-guard";
-                StateDirectoryMode = "0700";
+                # 0711 (traverse, not list): the guarded user can open the
+                # known-path config (0644) and audit log to run `status`/`rules`/
+                # `log` without sudo, while the store subdir stays root-only 0700.
+                StateDirectoryMode = "0711";
                 Environment = [
                   "FILE_GUARD_USER=${cfg.user}"
                   "FILE_GUARD_CONFIG=${cfg.configFile}"
                   "FILE_GUARD_STORE_DIR=/var/lib/file-guard/store"
                   "FILE_GUARD_AGENT_SOCKET=${socketPath}"
-                ];
+                ] ++ lib.optional (cfg.seedFile != null) "FILE_GUARD_SEED_CONFIG=${cfg.seedFile}";
               };
             };
           };

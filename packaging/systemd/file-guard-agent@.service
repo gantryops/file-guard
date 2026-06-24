@@ -11,7 +11,7 @@
 #   Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 [Unit]
 Description=file-guard prompt agent for %i
-Documentation=https://github.com/gantryops/file-guard
+Documentation=https://github.com/gantrydev/file-guard
 Requires=file-guard-agent@%i.socket
 After=file-guard-agent@%i.socket
 

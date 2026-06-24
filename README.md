@@ -73,7 +73,7 @@ socket is root-anchored.
 
 ### Debian / Ubuntu
 
-Grab the `.deb` from a [release](https://github.com/gantryops/file-guard/releases):
+Grab the `.deb` from a [release](https://github.com/gantrydev/file-guard/releases):
 
 ```sh
 sudo apt install ./file-guard_*_amd64.deb
@@ -89,14 +89,14 @@ it - see [2b](#2b-privileged-daemon-the-secure-deployment) and
 
 ```sh
 # Try it without installing
-nix run github:gantryops/file-guard -- --help
+nix run github:gantrydev/file-guard -- --help
 
 # Dev shell (cargo, rustc, clippy, rustfmt, fuse3 wired for pkg-config)
 nix develop
 cargo build
 
 # Build the binary
-nix build github:gantryops/file-guard
+nix build github:gantrydev/file-guard
 ./result/bin/file-guard --help
 ```
 
@@ -151,7 +151,7 @@ sudo systemctl enable --now file-guard.service
 ```nix
 # flake.nix
 {
-  inputs.file-guard.url = "github:gantryops/file-guard";
+  inputs.file-guard.url = "github:gantrydev/file-guard";
   # …
 }
 

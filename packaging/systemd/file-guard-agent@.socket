@@ -5,7 +5,7 @@
 #   sudo systemctl enable --now file-guard-agent@alice.socket
 [Unit]
 Description=file-guard prompt agent socket (root-anchored)
-Documentation=https://github.com/gantryops/file-guard
+Documentation=https://github.com/gantrydev/file-guard
 
 [Socket]
 ListenStream=/run/file-guard/agent.sock

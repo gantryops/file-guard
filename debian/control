@@ -5,7 +5,7 @@ Maintainer: File-Guard Contributors <noreply@example.com>
 Build-Depends: debhelper-compat (= 13), cargo, rustc, pkg-config, libfuse3-dev
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
-Homepage: https://github.com/gantryops/file-guard
+Homepage: https://github.com/gantrydev/file-guard
 
 Package: file-guard
 Architecture: any

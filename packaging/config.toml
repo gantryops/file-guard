@@ -1,7 +1,7 @@
 # file-guard configuration.
 #
 # Reference and ready-made per-tool snippets:
-#   /usr/share/doc/file-guard/   and   https://github.com/gantryops/file-guard
+#   /usr/share/doc/file-guard/   and   https://github.com/gantrydev/file-guard
 #
 # This default guards NOTHING until you add [[watch]] blocks - installing the
 # package is therefore safe. Captured "allow always" rules are appended here.
