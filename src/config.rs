@@ -7,6 +7,7 @@ pub struct Config {
     pub settings: Settings,
     pub watch: Vec<WatchEntry>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rule: Vec<RuleEntry>,
 }
 
@@ -216,7 +217,7 @@ impl Config {
         // parsed, abort rather than silently dropping captured rules.
         let rule = match std::fs::read_to_string(&live_path) {
             Ok(contents) => {
-                toml::from_str::<Config>(&contents)
+                parse_live_config(&contents)
                     .map_err(|e| {
                         anyhow::anyhow!(
                             "live config {} is corrupt ({e}); refusing to overwrite it and \
@@ -322,6 +323,40 @@ fn published_config_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn parse_live_config(contents: &str) -> Result<Config, toml::de::Error> {
+    match toml::from_str(contents) {
+        Ok(config) => Ok(config),
+        Err(err) => {
+            let Some(repaired) = remove_legacy_empty_rule_array(contents) else {
+                return Err(err);
+            };
+            toml::from_str(&repaired).map_err(|_| err)
+        }
+    }
+}
+
+fn remove_legacy_empty_rule_array(contents: &str) -> Option<String> {
+    if !contents.lines().any(|line| line.trim() == "[[rule]]") {
+        return None;
+    }
+
+    let mut removed = false;
+    let repaired = contents
+        .lines()
+        .filter(|line| {
+            if !removed && line.trim() == "rule = []" {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    removed.then(|| format!("{repaired}\n"))
 }
 
 /// Atomically write `contents` to `path` (temp file + rename) with mode 0644.
@@ -508,6 +543,62 @@ action = "allow"
         assert_eq!(merged.rule[0].binary, "/usr/bin/x");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_rules_are_not_serialized() {
+        let config = Config {
+            settings: Settings {
+                default_action: DefaultAction::Deny,
+                prompt_timeout: default_timeout(),
+                prompt_method: PromptMethod::Gui,
+                restore_on_stop: true,
+                log_destination: default_log_dest(),
+            },
+            watch: vec![WatchEntry {
+                path: "~/.config/gcloud/credentials.db".into(),
+                default_action: None,
+            }],
+            rule: Vec::new(),
+        };
+
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(!serialized.contains("rule = []"));
+        assert!(!serialized.contains("[[rule]]"));
+    }
+
+    #[test]
+    fn live_config_accepts_legacy_empty_rule_array_before_rule_tables() {
+        let toml = r#"
+rule = []
+
+[settings]
+default_action = "deny"
+
+[[watch]]
+path = "~/.config/gcloud/credentials.db"
+
+[[rule]]
+file = "~/.config/gcloud/credentials.db"
+binary = "/usr/bin/gcloud"
+action = "allow"
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+
+        let config = parse_live_config(toml).unwrap();
+        assert_eq!(config.rule.len(), 1);
+        assert_eq!(config.rule[0].binary, "/usr/bin/gcloud");
+    }
+
+    #[test]
+    fn legacy_empty_rule_array_repair_is_not_applied_without_rule_tables() {
+        let toml = r#"
+rule = []
+
+[settings]
+default_action = "deny"
+"#;
+        assert!(remove_legacy_empty_rule_array(toml).is_none());
     }
 
     #[test]
