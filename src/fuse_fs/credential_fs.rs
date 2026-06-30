@@ -17,8 +17,12 @@ use crate::policy::rule::Access;
 use crate::process::identify::ProcessInfo;
 use crate::store::BackingStore;
 
+/// Zero attribute TTL: the kernel must re-`getattr` rather than trust a cached
+/// size. Paired with `FOPEN_DIRECT_IO` (see `open`), this keeps the kernel from
+/// holding a stale, larger size and writing back cached pages over a file that
+/// a truncate has since shrunk — the resurrection that corrupts on editor saves.
 fn default_ttl() -> Duration {
-    Duration::from_secs(1)
+    Duration::ZERO
 }
 
 fn build_file_attr(file_size: u64) -> FileAttr {
@@ -195,7 +199,23 @@ impl CredentialFs {
             }
         }
 
-        // Standalone truncate(path) with no write handle: apply to the store.
+        // A truncate that carries no (matching) write handle — a path-based
+        // truncate, or an `ftruncate` the kernel routed without an fh. Apply it
+        // to the store, and — critically — to every open write handle's working
+        // buffer too. A handle opened before this truncate still holds the older,
+        // longer content; if left untouched it re-persists that stale buffer on
+        // release and silently reverts the truncate, leaving the dropped tail
+        // behind. Resizing the live handles keeps the truncate from being undone.
+        {
+            let mut handles = self.handles.lock().unwrap();
+            for state in handles.values_mut() {
+                if state.access == Access::Write {
+                    state.buf.resize(n, 0);
+                    state.dirty = true;
+                }
+            }
+        }
+
         let mut content = self.read_store_or_empty();
         content.resize(n, 0);
         self.store.store(&self.watched_path, &content)?;
@@ -249,8 +269,14 @@ impl Filesystem for CredentialFs {
             self.set_size(0);
         }
 
+        // FOPEN_DIRECT_IO: bypass the kernel page cache entirely. Reads and
+        // writes are delivered to us at the exact offsets/sizes the caller
+        // issued, with no read-ahead and no deferred write-back. Without it the
+        // kernel can cache pages for the old, longer file and flush stale ranges
+        // after a shrink, appending resurrected bytes (the tail-duplication
+        // corruption). Content is small, so the lost caching costs nothing.
         let fh = self.register_handle(HandleState { access, buf, dirty });
-        reply.opened(FileHandle(fh), FopenFlags::empty());
+        reply.opened(FileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
     }
 
     fn read(
@@ -451,7 +477,14 @@ impl Filesystem for CredentialFs {
 
 #[cfg(test)]
 mod tests {
-    use super::slice_content;
+    use super::*;
+    use crate::config::{Config, Settings};
+    use crate::logging::AccessLogger;
+    use crate::policy::engine::PolicyEngine;
+    use crate::prompt::PromptClient;
+    use std::collections::HashMap as StdHashMap;
+    use std::path::Path;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn slice_content_bounds() {
@@ -461,5 +494,123 @@ mod tests {
         assert_eq!(slice_content(c, 11, 10), b""); // at end
         assert_eq!(slice_content(c, 100, 10), b""); // past end
         assert_eq!(slice_content(c, 0, 0), b""); // zero size
+    }
+
+    struct MemStore(StdMutex<StdHashMap<PathBuf, Vec<u8>>>);
+
+    impl BackingStore for MemStore {
+        fn read(&self, id: &Path) -> anyhow::Result<Vec<u8>> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not stored"))
+        }
+        fn store(&self, id: &Path, contents: &[u8]) -> anyhow::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(id.to_path_buf(), contents.to_vec());
+            Ok(())
+        }
+        fn delete(&self, id: &Path) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(id);
+            Ok(())
+        }
+        fn list(&self) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+        fn exists(&self, id: &Path) -> bool {
+            self.0.lock().unwrap().contains_key(id)
+        }
+    }
+
+    /// A `CredentialFs` over an in-memory store, seeded with `initial`. The
+    /// policy/logger are never exercised by the buffer-level methods under test.
+    fn fixture(initial: &[u8]) -> (CredentialFs, PathBuf, Arc<MemStore>, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let watched = PathBuf::from("/credential");
+        let store = Arc::new(MemStore(StdMutex::new(
+            [(watched.clone(), initial.to_vec())].into_iter().collect(),
+        )));
+        let config = Config {
+            settings: toml::from_str::<Settings>("default_action = \"deny\"").unwrap(),
+            watch: vec![],
+            rule: vec![],
+        };
+        let policy = Arc::new(PolicyEngine::new(
+            &config,
+            Arc::new(PromptClient::new(
+                PathBuf::from("/nonexistent.sock"),
+                Duration::from_millis(50),
+                0,
+            )),
+        ));
+        let logger = Arc::new(AccessLogger::new("stdout").unwrap());
+        let fs = CredentialFs::new(
+            watched.clone(),
+            store.clone() as Arc<dyn BackingStore>,
+            policy,
+            logger,
+            rt.handle().clone(),
+        )
+        .unwrap();
+        (fs, watched, store, rt)
+    }
+
+    /// The race that corrupted the ADC file: a write handle is open with the old,
+    /// longer content buffered when a handle-less truncate (path truncate, or an
+    /// `ftruncate` delivered without an fh) shrinks the file. The truncate must
+    /// reach the live handle, or its stale buffer re-grows the file on release.
+    #[test]
+    fn fhless_truncate_is_not_reverted_by_open_write_handle() {
+        let (fs, watched, store, _rt) = fixture(b"OLD-LONG-CONTENT");
+
+        // Writer opens in place (no O_TRUNC): the handle preloads existing bytes.
+        let buf = fs.read_store_or_empty();
+        let fh = fs.register_handle(HandleState {
+            access: Access::Write,
+            buf,
+            dirty: false,
+        });
+
+        // Writer overwrites the head with shorter content, leaving a stale tail
+        // in the handle buffer (write() only grows — POSIX-correct on its own).
+        // This mirrors `write(offset=0, b"NEW")` without a kernel `ReplyWrite`.
+        {
+            let mut handles = fs.handles.lock().unwrap();
+            let state = handles.get_mut(&fh).unwrap();
+            state.buf[0..3].copy_from_slice(b"NEW");
+            state.dirty = true;
+        }
+
+        // A truncate arrives WITHOUT the fh (the bug trigger).
+        fs.apply_truncate(None, 3).unwrap();
+
+        // Release persists the handle. Pre-fix this re-wrote "NEW-LONG-CONTENT";
+        // the truncate must win.
+        fs.persist_handle(fh).unwrap();
+
+        assert_eq!(
+            store.read(&watched).unwrap(),
+            b"NEW",
+            "fh-less truncate was reverted by the open write handle's stale buffer"
+        );
+    }
+
+    /// A truncate that DOES carry its write handle shrinks that handle's buffer,
+    /// so the shorter content is what gets persisted (the editor ftruncate path).
+    #[test]
+    fn handle_truncate_shrinks_persisted_content() {
+        let (fs, watched, store, _rt) = fixture(b"");
+        let fh = fs.register_handle(HandleState {
+            access: Access::Write,
+            buf: b"HELLO WORLD".to_vec(),
+            dirty: true,
+        });
+        fs.apply_truncate(Some(fh), 5).unwrap();
+        fs.persist_handle(fh).unwrap();
+        assert_eq!(store.read(&watched).unwrap(), b"HELLO");
     }
 }

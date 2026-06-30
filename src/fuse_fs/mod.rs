@@ -145,6 +145,73 @@ mod integration_tests {
         );
     }
 
+    /// End-to-end repro of the corruption: an authorized writer opens the file
+    /// in place (no O_TRUNC), overwrites it with shorter content, and shrinks it
+    /// with `set_len` — exactly an editor's save. The mount must persist only the
+    /// new, shorter bytes, with no resurrected tail from the old content.
+    #[test]
+    fn in_place_overwrite_then_shrink_has_no_stale_tail() {
+        if !fuse_available() {
+            eprintln!("SKIP: no /dev/fuse");
+            return;
+        }
+        use std::io::{Seek, SeekFrom, Write};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = temp_dir("shrink");
+        let watched = tmp.join("credential");
+        let old = b"OLD-LONGER-CREDENTIAL-CONTENTS\n";
+        let new = b"new-short\n";
+
+        let store = Arc::new(MemStore(Mutex::new(
+            [(watched.clone(), old.to_vec())].into_iter().collect(),
+        )));
+        let me = std::env::current_exe().unwrap();
+        let config = Config {
+            settings: settings("deny"),
+            watch: vec![],
+            rule: vec![RuleEntry {
+                file: watched.to_string_lossy().into_owned(),
+                binary: me.to_string_lossy().into_owned(),
+                action: RuleAction::Allow,
+                access: Access::Any,
+                sha256: None,
+                signature: None,
+                script: None,
+                script_sha256: None,
+            }],
+        };
+        let policy = Arc::new(PolicyEngine::new(&config, unreachable_client()));
+        let logger = Arc::new(AccessLogger::new("stdout").unwrap());
+        let fs = CredentialFs::new(watched, store, policy, logger, rt.handle().clone()).unwrap();
+
+        let Some((mountpoint, session)) = mount(fs, &tmp) else {
+            std::fs::remove_dir_all(&tmp).ok();
+            return;
+        };
+
+        // Open in place WITHOUT truncate, overwrite the head, then shrink — the
+        // editor-save sequence that left a stale tail before the fix.
+        let write_result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).open(&mountpoint)?;
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(new)?;
+            f.set_len(new.len() as u64)?;
+            f.flush()
+        })();
+        let got = std::fs::read(&mountpoint);
+
+        drop(session);
+        std::fs::remove_dir_all(&tmp).ok();
+
+        write_result.expect("authorized in-place write must succeed");
+        assert_eq!(
+            got.unwrap(),
+            new,
+            "shrink left a resurrected tail from the old content"
+        );
+    }
+
     /// With no rule and an unreachable agent, the deny-by-default policy makes
     /// the kernel return EACCES on open — the secret never leaves the store.
     #[test]
