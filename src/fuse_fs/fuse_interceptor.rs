@@ -1,3 +1,5 @@
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,6 +8,79 @@ use fuser::{Config, MountOption, SessionACL};
 use super::credential_fs::CredentialFs;
 use crate::interceptor::{Interceptor, InterceptorArgs};
 use crate::store::BackingStore;
+
+/// Decode the octal escapes (`\040` space, `\011` tab, `\012` newline, `\134`
+/// backslash) the kernel writes for whitespace in `/proc/mounts` fields.
+fn unescape_mount_field(field: &str) -> String {
+    let b = field.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && b[i + 1..=i + 3].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
+            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The mountpoints in `/proc/mounts`-formatted `contents` that are file-guard
+/// FUSE mounts (`<source> <target> <fstype> ...`, source field 1).
+fn file_guard_mountpoints(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split(' ');
+            let source = f.next()?;
+            let target = f.next()?;
+            let fstype = f.next()?;
+            (source == "file-guard" && fstype.starts_with("fuse"))
+                .then(|| unescape_mount_field(target))
+        })
+        .collect()
+}
+
+/// Lazily detach any leftover file-guard mount at `watched_path`. A daemon that
+/// died without running its unmount path (SIGKILL, crash, hard restart) leaves
+/// the mountpoint as a wedged FUSE endpoint whose reads/writes fail with
+/// ENOTCONN, so the next start can't recreate the file there. systemd runs a
+/// single instance, so any file-guard mount still present at our path on start
+/// is by definition orphaned and safe to detach — making startup self-healing.
+fn clear_stale_mount(watched_path: &Path) {
+    let proc_mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let target = watched_path.to_string_lossy();
+    if !file_guard_mountpoints(&proc_mounts)
+        .iter()
+        .any(|m| m.as_str() == target)
+    {
+        return;
+    }
+
+    tracing::warn!(
+        "clearing orphaned file-guard mount at {} (left by a previous daemon)",
+        watched_path.display()
+    );
+    match CString::new(watched_path.as_os_str().as_bytes()) {
+        // MNT_DETACH detaches even a wedged endpoint; the kernel completes the
+        // teardown once the mount is no longer busy.
+        Ok(c) => {
+            if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } != 0 {
+                tracing::warn!(
+                    "failed to detach stale mount {}: {}",
+                    watched_path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        Err(e) => tracing::warn!("bad mountpoint path {}: {e}", watched_path.display()),
+    }
+}
 
 struct MountSession {
     watched_path: PathBuf,
@@ -35,6 +110,10 @@ impl FuseInterceptor {
         watched_path: &Path,
         store: &Arc<dyn BackingStore>,
     ) -> anyhow::Result<()> {
+        // Self-heal across an unclean shutdown: a leftover mount from a crashed
+        // daemon wedges this path (ENOTCONN), so detach it before we touch it.
+        clear_stale_mount(watched_path);
+
         // M3: never operate on a symlink - following it could expose or clobber
         // an unintended target. Require the operator to resolve it first.
         if let Ok(meta) = std::fs::symlink_metadata(watched_path)
@@ -196,5 +275,38 @@ impl Interceptor for FuseInterceptor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_guard_mountpoints, unescape_mount_field};
+
+    #[test]
+    fn unescape_decodes_octal_whitespace() {
+        assert_eq!(unescape_mount_field("/a/b"), "/a/b");
+        assert_eq!(unescape_mount_field("/a\\040b"), "/a b"); // space
+        assert_eq!(unescape_mount_field("/a\\134b"), "/a\\b"); // backslash
+        assert_eq!(unescape_mount_field("trailing\\04"), "trailing\\04"); // not a full escape
+    }
+
+    #[test]
+    fn finds_only_file_guard_fuse_mounts() {
+        let proc_mounts = "\
+proc /proc proc rw,nosuid 0 0
+file-guard /home/u/.config/gcloud/credentials.db fuse rw,nosuid,allow_other 0 0
+file-guard /home/u/with\\040space/adc.json fuse.file-guard rw 0 0
+/dev/sda1 / ext4 rw 0 0
+other-fuse /mnt/x fuse rw 0 0
+";
+        let mounts = file_guard_mountpoints(proc_mounts);
+        assert_eq!(
+            mounts,
+            vec![
+                "/home/u/.config/gcloud/credentials.db".to_string(),
+                "/home/u/with space/adc.json".to_string(),
+            ],
+            "must match file-guard fuse mounts only, decoding escapes"
+        );
     }
 }
