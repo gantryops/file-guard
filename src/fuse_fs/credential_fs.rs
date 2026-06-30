@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
-    BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo,
-    LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite,
-    Request, TimeOrNow, WriteFlags,
+    AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 
 use crate::logging::AccessLogger;
@@ -263,6 +263,19 @@ impl Filesystem for CredentialFs {
 
     fn lookup(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEntry) {
         reply.error(Errno::ENOENT);
+    }
+
+    /// `access(2)` is only an advisory permission probe — it grants nothing. The
+    /// real boundary is `open()`/`read()`/`write()`, each gated by policy, so we
+    /// answer the probe affirmatively rather than leave it unimplemented (which
+    /// made fuser log a `[Not Implemented]` warning on every check) and never
+    /// leak the policy decision through a side channel.
+    fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        if ino != INodeNo::ROOT {
+            reply.error(Errno::ENOENT);
+            return;
+        }
+        reply.ok();
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
